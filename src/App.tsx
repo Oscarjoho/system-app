@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useRef, useState } from 'react'
 import { useAuth } from './lib/auth'
 import AuthPage from './pages/AuthPage'
 import StatusPage from './pages/StatusPage'
@@ -23,6 +23,7 @@ export default function App() {
   const { session, loading, signOut, profile } = useAuth()
   const [openSection, setOpenSection] = useState<Section | null>(null)
   const [showAdmin, setShowAdmin] = useState(false)
+  const navRef = useRef<HTMLDivElement>(null)
 
   if (loading) return (
     <div className="min-h-screen bg-black flex items-center justify-center">
@@ -38,7 +39,10 @@ export default function App() {
     </div>
   )
 
-  const toggle = (id: Section) => setOpenSection(prev => prev === id ? null : id)
+  const toggle = (id: Section) => {
+    setOpenSection(prev => prev === id ? null : id)
+    setTimeout(() => navRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }), 10)
+  }
 
   const renderSection = () => {
     switch (openSection) {
@@ -73,7 +77,7 @@ export default function App() {
       <div className="flex-1 overflow-y-auto">
         <StatusPage />
 
-        <div className="flex border-t border-b border-gray-800">
+        <div ref={navRef} className="flex border-t border-b border-gray-800">
           {navItems.map((item) => (
             <button key={item.id} onClick={() => toggle(item.id)}
               className={`flex-1 py-2.5 text-xs tracking-wider transition-colors border-b-2 ${
