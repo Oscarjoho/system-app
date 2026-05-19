@@ -77,13 +77,13 @@ export default function App() {
       <div className="flex-1 overflow-y-auto">
         <StatusPage />
 
-        <div ref={navRef} className="flex border-t border-b border-gray-800">
+        <div ref={navRef} className="grid grid-cols-5 gap-2 px-4 py-3 border-t border-gray-800">
           {navItems.map((item) => (
             <button key={item.id} onClick={() => toggle(item.id)}
-              className={`flex-1 py-2.5 text-xs tracking-wider transition-colors border-b-2 ${
+              className={`py-3 text-xs tracking-widest rounded-xl border transition-colors ${
                 openSection === item.id
-                  ? 'text-blue-400 border-blue-400 bg-gray-950'
-                  : 'text-gray-600 border-transparent hover:text-gray-400'
+                  ? 'bg-gray-900 border-gray-600 text-white'
+                  : 'border-gray-800 text-gray-600 hover:text-gray-400'
               }`}>
               {item.label}
             </button>

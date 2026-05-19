@@ -1,15 +1,19 @@
 import { useEffect, useRef, useState } from 'react'
 import { supabase } from '../lib/supabase'
 import { useAuth } from '../lib/auth'
+import WeeklyPlanPage from './WeeklyPlanPage'
 
-interface Subtask { id: string; label: string; order_index: number }
+const DAYS = ['MAN', 'TIR', 'ONS', 'TOR', 'FRE', 'LØR', 'SØN']
+
 interface QuestReward { stat: string; xp_amount: number }
 interface Quest {
-  id: string; title: string; type: 'daily' | 'weekly' | 'boss'
-  subtasks: Subtask[]; rewards: QuestReward[]
+  id: string; title: string; type: string
+  subtasks: any[]; rewards: QuestReward[]
   subtasks_done: string[]; completed_at: string | null; user_quest_id: string | null
 }
 interface CustomQuest { id: string; title: string; type: 'daily' | 'weekly'; completed_at: string | null }
+
+type QuestTab = 'daily' | 'weekly' | 'boss'
 
 const statColors: Record<string, string> = {
   discipline: 'text-blue-300', strength: 'text-blue-500',
@@ -21,6 +25,14 @@ const xpStatMap: Record<string, string> = {
   intelligence: 'intelligence_xp', charisma: 'charisma_xp', discipline: 'discipline_xp',
 }
 
+function getDateForDay(dayIndex: number): string {
+  const now = new Date()
+  const currentDayIndex = now.getDay() === 0 ? 6 : now.getDay() - 1
+  const date = new Date(now)
+  date.setDate(now.getDate() + (dayIndex - currentDayIndex))
+  return date.toISOString().split('T')[0]
+}
+
 function getWeeklyBoss(bosses: Quest[]): Quest | null {
   if (!bosses.length) return null
   const weekNum = Math.floor(Date.now() / (7 * 24 * 60 * 60 * 1000))
@@ -29,61 +41,72 @@ function getWeeklyBoss(bosses: Quest[]): Quest | null {
 
 export default function QuestPage() {
   const { user } = useAuth()
-  const [quests, setQuests] = useState<Quest[]>([])
+  const todayIndex = new Date().getDay() === 0 ? 6 : new Date().getDay() - 1
+
+  const [questTab, setQuestTab] = useState<QuestTab>('daily')
+  const [selectedDay, setSelectedDay] = useState(todayIndex)
+  const [scheduledQuests, setScheduledQuests] = useState<any[]>([])
+  const [weeklyQuests, setWeeklyQuests] = useState<Quest[]>([])
+  const [bossQuests, setBossQuests] = useState<Quest[]>([])
   const [customQuests, setCustomQuests] = useState<CustomQuest[]>([])
-  const [expanded, setExpanded] = useState<string | null>(null)
+  const [completions, setCompletions] = useState<Set<string>>(new Set())
+  const [weeklyCompletions, setWeeklyCompletions] = useState<Set<string>>(new Set())
   const [loading, setLoading] = useState(true)
   const [animatingOut, setAnimatingOut] = useState<string | null>(null)
   const [hiddenIds, setHiddenIds] = useState<Set<string>>(new Set())
   const [toast, setToast] = useState<QuestReward[] | null>(null)
+  const [showPlan, setShowPlan] = useState(false)
   const toastTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
 
-  const fetchQuests = async () => {
+  const fetchData = async () => {
     if (!user) return
 
+    const { data: schedData } = await supabase
+      .from('quest_schedule')
+      .select('day_of_week, quest_id, quests(id, title, type, quest_rewards(*))')
+      .eq('user_id', user.id)
+    setScheduledQuests((schedData ?? []).map((s: any) => ({
+      ...s.quests, rewards: s.quests?.quest_rewards ?? [], day_of_week: s.day_of_week,
+    })).filter((s: any) => s.id))
+
+    const { data: subData } = await supabase
+      .from('user_quest_subscriptions')
+      .select('quest_id, quests(id, title, type, subtasks(*), quest_rewards(*))')
+      .eq('user_id', user.id)
+    const allSub = (subData ?? []).map((s: any) => ({
+      ...s.quests, rewards: s.quests?.quest_rewards ?? [],
+      subtasks: s.quests?.subtasks ?? [], subtasks_done: [], completed_at: null, user_quest_id: null,
+    })).filter(Boolean)
+    setWeeklyQuests(allSub.filter((q: any) => q.type === 'weekly'))
+
+    const { data: bossData } = await supabase.from('quests').select('*, quest_rewards(*)').eq('type', 'boss')
+    setBossQuests((bossData ?? []).map((q: any) => ({
+      id: q.id, title: q.title, type: q.type,
+      subtasks: [], rewards: q.quest_rewards ?? [], subtasks_done: [], completed_at: null, user_quest_id: null,
+    })))
+
+    const { data: cqData } = await supabase.from('custom_quests').select('*').eq('user_id', user.id).order('created_at')
+    setCustomQuests(cqData ?? [])
+  }
+
+  const fetchCompletions = async () => {
+    if (!user) return
+    const dateStr = getDateForDay(selectedDay)
+    const { data } = await supabase.from('quest_completions').select('quest_id')
+      .eq('user_id', user.id).eq('completed_date', dateStr)
+    setCompletions(new Set((data ?? []).map((c: any) => c.quest_id)))
+
     const now = new Date()
-    const todayStr = now.toISOString().split('T')[0]
     const weekStart = new Date(now)
     weekStart.setDate(now.getDate() - (now.getDay() === 0 ? 6 : now.getDay() - 1))
     weekStart.setHours(0, 0, 0, 0)
-    const weekStartStr = weekStart.toISOString().split('T')[0]
-
-    const { data: questData } = await supabase.from('quests').select('*, subtasks(*), quest_rewards(*)')
-    const { data: userQuestData } = await supabase.from('user_quests').select('*').eq('user_id', user.id)
-    const { data: completionData } = await supabase
-      .from('quest_completions')
-      .select('quest_id, completed_date')
-      .eq('user_id', user.id)
-      .gte('completed_date', weekStartStr)
-    const { data: subData } = await supabase.from('user_quest_subscriptions').select('quest_id').eq('user_id', user.id)
-    const subscribedIds = new Set((subData ?? []).map((s: any) => s.quest_id))
-    const completedToday = new Set((completionData ?? []).filter((c: any) => c.completed_date === todayStr).map((c: any) => c.quest_id))
-    const completedThisWeek = new Set((completionData ?? []).map((c: any) => c.quest_id))
-
-    const { data: cqData } = await supabase.from('custom_quests').select('*').eq('user_id', user.id)
-    setCustomQuests((cqData ?? []).map((cq: any) => ({
-      ...cq,
-      completed_at: cq.completed_at && cq.completed_at >= (cq.type === 'daily'
-        ? new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString()
-        : weekStart.toISOString()) ? cq.completed_at : null,
-    })))
-
-    setQuests((questData ?? []).map((q: any) => {
-      const uq = (userQuestData ?? []).find((u: any) => u.quest_id === q.id)
-      const isCompleted = q.type === 'daily' ? completedToday.has(q.id) : completedThisWeek.has(q.id)
-      return {
-        id: q.id, title: q.title, type: q.type,
-        subtasks: (q.subtasks ?? []).sort((a: any, b: any) => a.order_index - b.order_index),
-        rewards: q.quest_rewards ?? [],
-        subtasks_done: uq?.subtasks_done ?? [],
-        completed_at: isCompleted ? todayStr : null,
-        user_quest_id: uq?.id ?? null,
-        subscribed: q.type === 'boss' ? true : subscribedIds.has(q.id),
-      }
-    }).filter((q: any) => q.subscribed))
+    const { data: wData } = await supabase.from('quest_completions').select('quest_id')
+      .eq('user_id', user.id).gte('completed_date', weekStart.toISOString().split('T')[0])
+    setWeeklyCompletions(new Set((wData ?? []).map((c: any) => c.quest_id)))
   }
 
-  useEffect(() => { fetchQuests().finally(() => setLoading(false)) }, [user])
+  useEffect(() => { fetchData().finally(() => setLoading(false)) }, [user])
+  useEffect(() => { fetchCompletions() }, [user, selectedDay])
 
   const giveXP = async (rewards: QuestReward[]) => {
     for (const r of rewards) {
@@ -96,105 +119,50 @@ export default function QuestPage() {
     }
   }
 
-  const showToast = (rewards: QuestReward[]) => {
+  const showToastMsg = (rewards: QuestReward[]) => {
     setToast(rewards)
     if (toastTimer.current) clearTimeout(toastTimer.current)
     toastTimer.current = setTimeout(() => setToast(null), 2000)
   }
 
-  const toggleCustomDone = async (cq: CustomQuest) => {
-    if (cq.completed_at) return
-    await supabase.from('custom_quests').update({ completed_at: new Date().toISOString() }).eq('id', cq.id)
-    await fetchQuests()
+  const completeDayQuest = async (quest: any) => {
+    if (completions.has(quest.id)) return
+    const dateStr = getDateForDay(selectedDay)
+    const { error } = await supabase.from('quest_completions')
+      .insert({ user_id: user!.id, quest_id: quest.id, completed_date: dateStr })
+    if (!error) { await giveXP(quest.rewards); showToastMsg(quest.rewards) }
+    await fetchCompletions()
   }
 
-  const animateComplete = (id: string) => {
-    setAnimatingOut(id)
-    setTimeout(() => { setHiddenIds(prev => new Set([...prev, id])); setAnimatingOut(null) }, 500)
-  }
-
-  const completeQuest = async (quest: Quest) => {
-    if (animatingOut || hiddenIds.has(quest.id)) return
-    animateComplete(quest.id)
+  const completeWeeklyOrBoss = async (quest: Quest) => {
+    if (weeklyCompletions.has(quest.id) || animatingOut || hiddenIds.has(quest.id)) return
+    setAnimatingOut(quest.id)
+    setTimeout(() => { setHiddenIds(prev => new Set([...prev, quest.id])); setAnimatingOut(null) }, 500)
     const todayStr = new Date().toISOString().split('T')[0]
     const { error } = await supabase.from('quest_completions')
       .insert({ user_id: user!.id, quest_id: quest.id, completed_date: todayStr })
-    if (!error) { await giveXP(quest.rewards); showToast(quest.rewards) }
-    await fetchQuests()
+    if (!error) { await giveXP(quest.rewards); showToastMsg(quest.rewards) }
+    await fetchCompletions()
   }
 
-  const toggleSubtask = async (quest: Quest, subtaskId: string) => {
-    let uqId = quest.user_quest_id
-    if (!uqId) {
-      const { data } = await supabase.from('user_quests')
-        .insert({ user_id: user!.id, quest_id: quest.id, subtasks_done: [] }).select('id').single()
-      uqId = data?.id ?? null
-    }
-    if (!uqId) return
-    const already = quest.subtasks_done.includes(subtaskId)
-    const newDone = already ? quest.subtasks_done.filter(id => id !== subtaskId) : [...quest.subtasks_done, subtaskId]
-    const allDone = quest.subtasks.every(s => newDone.includes(s.id))
-    await supabase.from('user_quests').update({ subtasks_done: newDone }).eq('id', uqId)
-    if (allDone && !quest.completed_at) {
-      const todayStr = new Date().toISOString().split('T')[0]
-      const { error } = await supabase.from('quest_completions')
-        .insert({ user_id: user!.id, quest_id: quest.id, completed_date: todayStr })
-      if (!error) { animateComplete(quest.id); await giveXP(quest.rewards); showToast(quest.rewards) }
-    }
-    await fetchQuests()
+  const toggleCustomDone = async (cq: CustomQuest) => {
+    if (cq.completed_at) return
+    await supabase.from('custom_quests').update({ completed_at: new Date().toISOString() }).eq('id', cq.id)
+    await fetchData()
   }
 
-  const QuestCard = ({ quest }: { quest: Quest }) => {
-    if (hiddenIds.has(quest.id)) return null
-    const isAnimating = animatingOut === quest.id
-    const isOpen = expanded === quest.id
-    const hasSubtasks = quest.subtasks.length > 0
-    return (
-      <div className={`transition-all duration-500 ease-in-out ${isAnimating ? 'opacity-0 -translate-y-3 scale-95 pointer-events-none' : 'opacity-100'}`}>
-        <div className={`bg-black rounded-xl border overflow-hidden ${quest.type === 'boss' ? 'border-blue-900' : 'border-gray-800'}`}>
-          <button className="w-full flex items-center justify-between p-3 text-left active:bg-gray-950 transition-colors"
-            onClick={() => hasSubtasks ? setExpanded(isOpen ? null : quest.id) : completeQuest(quest)}>
-            <div className="flex items-center gap-2">
-              <span className="text-gray-700 text-lg">○</span>
-              <span className="text-sm text-gray-200">{quest.title}</span>
-            </div>
-            <div className="flex items-center gap-1.5 shrink-0">
-              {quest.rewards.map(r => (
-                <span key={r.stat} className={`text-xs font-medium ${statColors[r.stat] ?? 'text-gray-400'}`}>
-                  +{r.xp_amount} {r.stat.slice(0, 3).toUpperCase()}
-                </span>
-              ))}
-              {hasSubtasks && <span className="text-gray-700 ml-1 text-xs">{isOpen ? '▲' : '▼'}</span>}
-            </div>
-          </button>
-          {isOpen && hasSubtasks && (
-            <div className="px-3 pb-3 space-y-2 border-t border-gray-800 pt-2">
-              {quest.subtasks.map(sub => {
-                const checked = quest.subtasks_done.includes(sub.id)
-                return (
-                  <label key={sub.id} className="flex items-center gap-2 cursor-pointer">
-                    <input type="checkbox" checked={checked} onChange={() => toggleSubtask(quest, sub.id)} className="accent-blue-500 w-4 h-4" />
-                    <span className={`text-sm ${checked ? 'line-through text-gray-600' : 'text-gray-400'}`}>{sub.label}</span>
-                  </label>
-                )
-              })}
-            </div>
-          )}
-        </div>
-      </div>
-    )
-  }
-
+  if (showPlan) return <WeeklyPlanPage onClose={() => { setShowPlan(false); fetchData(); fetchCompletions() }} />
   if (loading) return <div className="flex items-center justify-center h-32"><p className="text-xs text-gray-600 tracking-widest">LOADING...</p></div>
 
-  const daily = quests.filter(q => q.type === 'daily' && !q.completed_at)
+  const dayQuests = scheduledQuests.filter((q: any) => q.day_of_week === selectedDay)
+  const now = new Date()
+  const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString()
   const dailyCustom = customQuests.filter(cq => cq.type === 'daily')
-  const weekly = quests.filter(q => q.type === 'weekly' && !q.completed_at)
   const weeklyCustom = customQuests.filter(cq => cq.type === 'weekly')
-  const boss = getWeeklyBoss(quests.filter(q => q.type === 'boss'))
+  const boss = getWeeklyBoss(bossQuests)
 
   return (
-    <div className="p-4 space-y-6">
+    <div className="p-4 space-y-4">
       {toast && (
         <div className="fixed top-14 left-0 right-0 flex justify-center gap-2 z-50 pointer-events-none">
           {toast.map((r, i) => (
@@ -205,71 +173,160 @@ export default function QuestPage() {
         </div>
       )}
 
-      {(daily.length > 0 || dailyCustom.length > 0) && (
-        <div className="space-y-2">
-          <h3 className="text-xs text-gray-600 tracking-widest">DAILY</h3>
-          {daily.map(q => <QuestCard key={q.id} quest={q} />)}
-          {dailyCustom.map(cq => (
-            <div key={cq.id} className={`bg-black rounded-xl border border-gray-800 transition-all duration-300 ${cq.completed_at ? 'opacity-40' : ''}`}>
-              <button className="w-full flex items-center justify-between p-3 text-left"
-                onClick={() => toggleCustomDone(cq)}>
-                <div className="flex items-center gap-2">
-                  <span className={`text-lg ${cq.completed_at ? 'text-blue-400' : 'text-gray-700'}`}>{cq.completed_at ? '●' : '○'}</span>
-                  <span className={`text-sm ${cq.completed_at ? 'line-through text-gray-600' : 'text-gray-200'}`}>{cq.title}</span>
-                </div>
-                <span className="text-xs text-gray-700">CUSTOM</span>
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
+      {/* Sub-tabs */}
+      <div className="flex gap-2">
+        {(['daily', 'weekly', 'boss'] as const).map(tab => (
+          <button key={tab} onClick={() => setQuestTab(tab)}
+            className={`flex-1 py-2.5 text-xs tracking-widest rounded-xl border transition-colors ${
+              questTab === tab ? 'bg-blue-500 border-blue-500 text-white' : 'border-gray-800 text-gray-600'
+            }`}>
+            {tab === 'daily' ? 'DAILY' : tab === 'weekly' ? 'WEEKLY' : 'BOSS'}
+          </button>
+        ))}
+      </div>
 
-      {(weekly.length > 0 || weeklyCustom.length > 0) && (
-        <div className="space-y-2">
-          <h3 className="text-xs text-gray-600 tracking-widest">WEEKLY</h3>
-          {weekly.map(q => <QuestCard key={q.id} quest={q} />)}
-          {weeklyCustom.map(cq => (
-            <div key={cq.id} className={`bg-black rounded-xl border border-gray-800 transition-all duration-300 ${cq.completed_at ? 'opacity-40' : ''}`}>
-              <button className="w-full flex items-center justify-between p-3 text-left"
-                onClick={() => toggleCustomDone(cq)}>
-                <div className="flex items-center gap-2">
-                  <span className={`text-lg ${cq.completed_at ? 'text-blue-400' : 'text-gray-700'}`}>{cq.completed_at ? '●' : '○'}</span>
-                  <span className={`text-sm ${cq.completed_at ? 'line-through text-gray-600' : 'text-gray-200'}`}>{cq.title}</span>
-                </div>
-                <span className="text-xs text-gray-700">CUSTOM</span>
-              </button>
-            </div>
-          ))}
-        </div>
-      )}
-
-      {boss && !hiddenIds.has(boss.id) && (
-        <div className="space-y-2">
-          <h3 className="text-xs text-gray-600 tracking-widest">BOSS FIGHT</h3>
-          <div className={`transition-all duration-500 ${animatingOut === boss.id ? 'opacity-0 -translate-y-3 scale-95' : 'opacity-100'}`}>
-            <button onClick={() => completeQuest(boss)}
-              className="w-full flex items-center justify-between p-3 bg-black rounded-xl border border-blue-900 text-left hover:bg-gray-950 transition-colors">
-              <div className="flex items-center gap-2">
-                <span className="text-gray-700 text-lg">○</span>
-                <span className="text-sm text-gray-200">{boss.title}</span>
-              </div>
-              <div className="flex gap-1.5">
-                {boss.rewards.map(r => (
-                  <span key={r.stat} className={`text-xs font-medium ${statColors[r.stat] ?? 'text-gray-400'}`}>
-                    +{r.xp_amount} {r.stat.slice(0, 3).toUpperCase()}
-                  </span>
-                ))}
-              </div>
-            </button>
+      {/* ── DAILY ── */}
+      {questTab === 'daily' && (
+        <div className="space-y-4">
+          {/* Day picker */}
+          <div className="flex justify-between">
+            {DAYS.map((day, i) => {
+              const isToday = i === todayIndex
+              const isSelected = i === selectedDay
+              return (
+                <button key={day} onClick={() => setSelectedDay(i)} className="flex flex-col items-center gap-1">
+                  <span className={`text-xs tracking-wider ${isSelected ? 'text-blue-400' : 'text-gray-600'}`}>{day}</span>
+                  <div className={`w-8 h-8 rounded-full flex items-center justify-center border-2 transition-colors ${
+                    isSelected ? 'bg-blue-500 border-blue-500 text-white'
+                    : isToday ? 'border-blue-800 text-blue-400'
+                    : 'border-gray-800 text-gray-700'
+                  }`}>
+                    <span className="text-xs">{i + 1}</span>
+                  </div>
+                </button>
+              )
+            })}
           </div>
+
+          {/* Quests for selected day */}
+          <div className="space-y-2">
+            <p className="text-xs text-gray-600 tracking-widest">{DAYS[selectedDay]}{selectedDay === todayIndex ? ' — I DAG' : ''}</p>
+
+            {dayQuests.length === 0 && dailyCustom.length === 0 && (
+              <p className="text-xs text-gray-700 text-center py-6 tracking-wider">Ingen quests planlagt — trykk PLANLEGG UKEN</p>
+            )}
+
+            {dayQuests.map((quest: any) => {
+              const done = completions.has(quest.id)
+              return (
+                <div key={quest.id} onClick={() => completeDayQuest(quest)}
+                  className={`flex items-center justify-between bg-black border rounded-xl px-3 py-2.5 transition-all ${done ? 'border-blue-900 opacity-50' : 'border-gray-800'}`}>
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className={done ? 'text-blue-400' : 'text-gray-700'}>{done ? '●' : '○'}</span>
+                    <span className={`text-sm truncate ${done ? 'line-through text-gray-500' : 'text-gray-200'}`}>{quest.title}</span>
+                  </div>
+                  <div className="flex gap-1 shrink-0">
+                    {quest.rewards?.map((r: any) => (
+                      <span key={r.stat} className={`text-xs ${statColors[r.stat] ?? 'text-gray-500'}`}>
+                        +{r.xp_amount} {r.stat.slice(0, 3).toUpperCase()}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )
+            })}
+
+            {dailyCustom.map(cq => {
+              const done = !!cq.completed_at && cq.completed_at >= todayStart
+              return (
+                <div key={cq.id} onClick={() => toggleCustomDone(cq)}
+                  className={`flex items-center justify-between bg-black border border-gray-800 rounded-xl px-3 py-2.5 transition-all ${done ? 'opacity-40' : ''}`}>
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className={done ? 'text-blue-400' : 'text-gray-700'}>{done ? '●' : '○'}</span>
+                    <span className={`text-sm truncate ${done ? 'line-through text-gray-500' : 'text-gray-200'}`}>{cq.title}</span>
+                  </div>
+                  <span className="text-xs text-gray-700 shrink-0">CUSTOM</span>
+                </div>
+              )
+            })}
+          </div>
+
+          {/* Plan button */}
+          <button onClick={() => setShowPlan(true)}
+            className="w-full py-3 text-xs tracking-widest text-gray-600 hover:text-gray-400 border border-dashed border-gray-800 rounded-xl transition-colors">
+            PLANLEGG UKEN
+          </button>
         </div>
       )}
 
-      {daily.length === 0 && dailyCustom.length === 0 && weekly.length === 0 && weeklyCustom.length === 0 && (!boss || hiddenIds.has(boss.id)) && (
-        <div className="flex flex-col items-center justify-center py-16 text-center">
-          <p className="text-2xl mb-2">✓</p>
-          <p className="text-sm text-gray-500 tracking-wider">Alle quests fullført</p>
-          <p className="text-xs text-gray-700 mt-1">Legg til flere under PLAN</p>
+      {/* ── WEEKLY ── */}
+      {questTab === 'weekly' && (
+        <div className="space-y-2">
+          {weeklyQuests.filter(q => !hiddenIds.has(q.id)).map(quest => {
+            const done = weeklyCompletions.has(quest.id)
+            return (
+              <div key={quest.id} className={`transition-all duration-500 ${animatingOut === quest.id ? 'opacity-0 -translate-y-3 scale-95' : ''}`}>
+                <div onClick={() => !done && completeWeeklyOrBoss(quest)}
+                  className={`flex items-center justify-between bg-black border rounded-xl px-3 py-2.5 transition-all ${done ? 'border-blue-900 opacity-50' : 'border-gray-800'}`}>
+                  <div className="flex items-center gap-2 min-w-0">
+                    <span className={done ? 'text-blue-400' : 'text-gray-700'}>{done ? '●' : '○'}</span>
+                    <span className={`text-sm truncate ${done ? 'line-through text-gray-500' : 'text-gray-200'}`}>{quest.title}</span>
+                  </div>
+                  <div className="flex gap-1 shrink-0">
+                    {quest.rewards.map(r => (
+                      <span key={r.stat} className={`text-xs ${statColors[r.stat] ?? 'text-gray-400'}`}>
+                        +{r.xp_amount} {r.stat.slice(0, 3).toUpperCase()}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              </div>
+            )
+          })}
+          {weeklyCustom.map(cq => {
+            const done = !!cq.completed_at
+            return (
+              <div key={cq.id} onClick={() => toggleCustomDone(cq)}
+                className={`flex items-center justify-between bg-black border border-gray-800 rounded-xl px-3 py-2.5 ${done ? 'opacity-40' : ''}`}>
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className={done ? 'text-blue-400' : 'text-gray-700'}>{done ? '●' : '○'}</span>
+                  <span className={`text-sm truncate ${done ? 'line-through text-gray-500' : 'text-gray-200'}`}>{cq.title}</span>
+                </div>
+                <span className="text-xs text-gray-700 shrink-0">CUSTOM</span>
+              </div>
+            )
+          })}
+          {weeklyQuests.length === 0 && weeklyCustom.length === 0 && (
+            <p className="text-xs text-gray-700 text-center py-6 tracking-wider">Ingen weekly quests lagt til</p>
+          )}
+        </div>
+      )}
+
+      {/* ── BOSS ── */}
+      {questTab === 'boss' && (
+        <div className="space-y-2">
+          {boss && !hiddenIds.has(boss.id) ? (
+            <div className={`transition-all duration-500 ${animatingOut === boss.id ? 'opacity-0 -translate-y-3 scale-95' : ''}`}>
+              <div onClick={() => !weeklyCompletions.has(boss.id) && completeWeeklyOrBoss(boss)}
+                className={`flex items-center justify-between bg-black border rounded-xl px-3 py-2.5 transition-all ${weeklyCompletions.has(boss.id) ? 'border-blue-900 opacity-50' : 'border-blue-900'}`}>
+                <div className="flex items-center gap-2 min-w-0">
+                  <span className={weeklyCompletions.has(boss.id) ? 'text-blue-400' : 'text-gray-700'}>
+                    {weeklyCompletions.has(boss.id) ? '●' : '○'}
+                  </span>
+                  <span className={`text-sm truncate ${weeklyCompletions.has(boss.id) ? 'line-through text-gray-500' : 'text-gray-200'}`}>{boss.title}</span>
+                </div>
+                <div className="flex gap-1 shrink-0">
+                  {boss.rewards.map(r => (
+                    <span key={r.stat} className={`text-xs ${statColors[r.stat] ?? 'text-gray-400'}`}>
+                      +{r.xp_amount} {r.stat.slice(0, 3).toUpperCase()}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            </div>
+          ) : (
+            <p className="text-xs text-gray-700 text-center py-6 tracking-wider">Ingen boss quest denne uken</p>
+          )}
         </div>
       )}
     </div>

@@ -31,7 +31,7 @@ const getDateForDay = (dayIndex: number): string => {
 
 type PlanView = 'main' | 'library' | 'admin'
 
-export default function WeeklyPlanPage() {
+export default function WeeklyPlanPage({ onClose }: { onClose?: () => void } = {}) {
   const { user } = useAuth()
   const today = new Date().getDay()
   const todayIndex = today === 0 ? 6 : today - 1
@@ -152,6 +152,12 @@ export default function WeeklyPlanPage() {
 
   return (
     <div className="p-4 space-y-6">
+
+      {onClose && (
+        <button onClick={onClose} className="text-xs text-gray-500 hover:text-white tracking-widest mb-2">
+          ← TILBAKE
+        </button>
+      )}
 
       {/* ── WEEK CALENDAR ── */}
       <div>
