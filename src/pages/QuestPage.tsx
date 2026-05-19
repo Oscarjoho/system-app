@@ -103,8 +103,8 @@ export default function QuestPage() {
   }
 
   const toggleCustomDone = async (cq: CustomQuest) => {
-    const isDone = !!cq.completed_at
-    await supabase.from('custom_quests').update({ completed_at: isDone ? null : new Date().toISOString() }).eq('id', cq.id)
+    if (cq.completed_at) return
+    await supabase.from('custom_quests').update({ completed_at: new Date().toISOString() }).eq('id', cq.id)
     await fetchQuests()
   }
 

@@ -89,13 +89,11 @@ export default function WeeklyPlanPage() {
   }
 
   const toggleDayCompletion = async (quest: SubscribedQuest) => {
+    if (completions.has(quest.id)) return
     const dateStr = getDateForDay(selectedDay)
-    if (completions.has(quest.id)) {
-      await supabase.from('quest_completions').delete().eq('user_id', user!.id).eq('quest_id', quest.id).eq('completed_date', dateStr)
-    } else {
-      const { error } = await supabase.from('quest_completions').insert({ user_id: user!.id, quest_id: quest.id, completed_date: dateStr })
-      if (!error) await giveXP(quest.rewards)
-    }
+    const { error } = await supabase.from('quest_completions')
+      .insert({ user_id: user!.id, quest_id: quest.id, completed_date: dateStr })
+    if (!error) await giveXP(quest.rewards)
     await fetchCompletions()
   }
 
@@ -125,8 +123,8 @@ export default function WeeklyPlanPage() {
   }
 
   const toggleCustomDone = async (cq: CustomQuest) => {
-    const isDone = !!cq.completed_at
-    await supabase.from('custom_quests').update({ completed_at: isDone ? null : new Date().toISOString() }).eq('id', cq.id)
+    if (cq.completed_at) return
+    await supabase.from('custom_quests').update({ completed_at: new Date().toISOString() }).eq('id', cq.id)
     await fetchData()
   }
 
