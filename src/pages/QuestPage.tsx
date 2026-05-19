@@ -42,34 +42,41 @@ export default function QuestPage() {
     if (!user) return
 
     const now = new Date()
-    const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString()
+    const todayStr = now.toISOString().split('T')[0]
     const weekStart = new Date(now)
     weekStart.setDate(now.getDate() - (now.getDay() === 0 ? 6 : now.getDay() - 1))
     weekStart.setHours(0, 0, 0, 0)
-    const weekStartISO = weekStart.toISOString()
+    const weekStartStr = weekStart.toISOString().split('T')[0]
 
     const { data: questData } = await supabase.from('quests').select('*, subtasks(*), quest_rewards(*)')
     const { data: userQuestData } = await supabase.from('user_quests').select('*').eq('user_id', user.id)
+    const { data: completionData } = await supabase
+      .from('quest_completions')
+      .select('quest_id, completed_date')
+      .eq('user_id', user.id)
+      .gte('completed_date', weekStartStr)
     const { data: subData } = await supabase.from('user_quest_subscriptions').select('quest_id').eq('user_id', user.id)
     const subscribedIds = new Set((subData ?? []).map((s: any) => s.quest_id))
+    const completedToday = new Set((completionData ?? []).filter((c: any) => c.completed_date === todayStr).map((c: any) => c.quest_id))
+    const completedThisWeek = new Set((completionData ?? []).map((c: any) => c.quest_id))
 
     const { data: cqData } = await supabase.from('custom_quests').select('*').eq('user_id', user.id)
     setCustomQuests((cqData ?? []).map((cq: any) => ({
       ...cq,
-      completed_at: cq.completed_at && cq.completed_at >= (cq.type === 'daily' ? todayStart : weekStartISO) ? cq.completed_at : null,
+      completed_at: cq.completed_at && cq.completed_at >= (cq.type === 'daily'
+        ? new Date(now.getFullYear(), now.getMonth(), now.getDate()).toISOString()
+        : weekStart.toISOString()) ? cq.completed_at : null,
     })))
 
     setQuests((questData ?? []).map((q: any) => {
       const uq = (userQuestData ?? []).find((u: any) => u.quest_id === q.id)
-      const completedAt = uq?.completed_at ?? null
-      const windowStart = q.type === 'daily' ? todayStart : weekStartISO
-      const isCompleted = completedAt && completedAt >= windowStart ? completedAt : null
+      const isCompleted = q.type === 'daily' ? completedToday.has(q.id) : completedThisWeek.has(q.id)
       return {
         id: q.id, title: q.title, type: q.type,
         subtasks: (q.subtasks ?? []).sort((a: any, b: any) => a.order_index - b.order_index),
         rewards: q.quest_rewards ?? [],
         subtasks_done: uq?.subtasks_done ?? [],
-        completed_at: isCompleted,
+        completed_at: isCompleted ? todayStr : null,
         user_quest_id: uq?.id ?? null,
         subscribed: q.type === 'boss' ? true : subscribedIds.has(q.id),
       }
@@ -109,15 +116,10 @@ export default function QuestPage() {
   const completeQuest = async (quest: Quest) => {
     if (animatingOut || hiddenIds.has(quest.id)) return
     animateComplete(quest.id)
-    let uqId = quest.user_quest_id
-    if (!uqId) {
-      const { data } = await supabase.from('user_quests')
-        .insert({ user_id: user!.id, quest_id: quest.id, subtasks_done: [] }).select('id').single()
-      uqId = data?.id ?? null
-    }
-    if (uqId) await supabase.from('user_quests').update({ completed_at: new Date().toISOString() }).eq('id', uqId)
-    await giveXP(quest.rewards)
-    showToast(quest.rewards)
+    const todayStr = new Date().toISOString().split('T')[0]
+    const { error } = await supabase.from('quest_completions')
+      .insert({ user_id: user!.id, quest_id: quest.id, completed_date: todayStr })
+    if (!error) { await giveXP(quest.rewards); showToast(quest.rewards) }
     await fetchQuests()
   }
 
@@ -132,10 +134,13 @@ export default function QuestPage() {
     const already = quest.subtasks_done.includes(subtaskId)
     const newDone = already ? quest.subtasks_done.filter(id => id !== subtaskId) : [...quest.subtasks_done, subtaskId]
     const allDone = quest.subtasks.every(s => newDone.includes(s.id))
-    await supabase.from('user_quests').update({
-      subtasks_done: newDone, completed_at: allDone ? new Date().toISOString() : null
-    }).eq('id', uqId)
-    if (allDone && !quest.completed_at) { animateComplete(quest.id); await giveXP(quest.rewards); showToast(quest.rewards) }
+    await supabase.from('user_quests').update({ subtasks_done: newDone }).eq('id', uqId)
+    if (allDone && !quest.completed_at) {
+      const todayStr = new Date().toISOString().split('T')[0]
+      const { error } = await supabase.from('quest_completions')
+        .insert({ user_id: user!.id, quest_id: quest.id, completed_date: todayStr })
+      if (!error) { animateComplete(quest.id); await giveXP(quest.rewards); showToast(quest.rewards) }
+    }
     await fetchQuests()
   }
 

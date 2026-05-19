@@ -16,6 +16,18 @@ const statColors: Record<string, string> = {
   intelligence: 'text-slate-400', endurance: 'text-blue-400',
   health: 'text-blue-700', charisma: 'text-gray-400',
 }
+const xpStatMap: Record<string, string> = {
+  health: 'health_xp', strength: 'strength_xp', endurance: 'endurance_xp',
+  intelligence: 'intelligence_xp', charisma: 'charisma_xp', discipline: 'discipline_xp',
+}
+
+const getDateForDay = (dayIndex: number): string => {
+  const now = new Date()
+  const currentDayIndex = now.getDay() === 0 ? 6 : now.getDay() - 1
+  const date = new Date(now)
+  date.setDate(now.getDate() + (dayIndex - currentDayIndex))
+  return date.toISOString().split('T')[0]
+}
 
 type PlanView = 'main' | 'library' | 'admin'
 
@@ -27,6 +39,7 @@ export default function WeeklyPlanPage() {
   const [scheduled, setScheduled] = useState<ScheduledQuest[]>([])
   const [subscribed, setSubscribed] = useState<SubscribedQuest[]>([])
   const [customQuests, setCustomQuests] = useState<CustomQuest[]>([])
+  const [completions, setCompletions] = useState<Set<string>>(new Set())
   const [showAddDay, setShowAddDay] = useState(false)
   const [loading, setLoading] = useState(true)
   const [view, setView] = useState<PlanView>('main')
@@ -57,7 +70,37 @@ export default function WeeklyPlanPage() {
     setLoading(false)
   }
 
+  const fetchCompletions = async () => {
+    if (!user) return
+    const dateStr = getDateForDay(selectedDay)
+    const { data } = await supabase.from('quest_completions').select('quest_id').eq('user_id', user.id).eq('completed_date', dateStr)
+    setCompletions(new Set((data ?? []).map((c: any) => c.quest_id)))
+  }
+
+  const giveXP = async (rewards: any[]) => {
+    for (const r of rewards) {
+      const col = xpStatMap[r.stat]; if (!col) continue
+      const { data } = await supabase.from('stats').select(col).eq('user_id', user!.id).single()
+      if (data) {
+        const cur = (data as any)[col] ?? 0
+        await supabase.from('stats').update({ [col]: cur + r.xp_amount }).eq('user_id', user!.id)
+      }
+    }
+  }
+
+  const toggleDayCompletion = async (quest: SubscribedQuest) => {
+    const dateStr = getDateForDay(selectedDay)
+    if (completions.has(quest.id)) {
+      await supabase.from('quest_completions').delete().eq('user_id', user!.id).eq('quest_id', quest.id).eq('completed_date', dateStr)
+    } else {
+      const { error } = await supabase.from('quest_completions').insert({ user_id: user!.id, quest_id: quest.id, completed_date: dateStr })
+      if (!error) await giveXP(quest.rewards)
+    }
+    await fetchCompletions()
+  }
+
   useEffect(() => { fetchData() }, [user])
+  useEffect(() => { fetchCompletions() }, [user, selectedDay])
 
   const addToDay = async (quest: SubscribedQuest) => {
     await supabase.from('quest_schedule').upsert({ user_id: user!.id, quest_id: quest.id, day_of_week: selectedDay })
@@ -146,24 +189,27 @@ export default function WeeklyPlanPage() {
             <p className="text-xs text-gray-600 tracking-widest">{DAYS[selectedDay]}{selectedDay === todayIndex ? ' — I DAG' : ''}</p>
             <span className="text-xs text-gray-700">{dayQuests.length} quests</span>
           </div>
-          {dayQuests.map(quest => (
-            <div key={quest.id} className="flex items-center justify-between bg-black border border-gray-800 rounded-xl px-3 py-2.5">
-              <div className="flex items-center gap-2 min-w-0">
-                <span className="text-gray-700">○</span>
-                <span className="text-sm text-gray-200 truncate">{quest.title}</span>
-              </div>
-              <div className="flex items-center gap-2 shrink-0">
-                <div className="flex gap-1">
-                  {quest.rewards?.map((r: any) => (
-                    <span key={r.stat} className={`text-xs ${statColors[r.stat] ?? 'text-gray-500'}`}>
-                      +{r.xp_amount} {r.stat.slice(0, 3).toUpperCase()}
-                    </span>
-                  ))}
+          {dayQuests.map(quest => {
+            const done = completions.has(quest.id)
+            return (
+              <div key={quest.id} className={`flex items-center justify-between bg-black border rounded-xl px-3 py-2.5 transition-all ${done ? 'border-blue-900 opacity-60' : 'border-gray-800'}`}>
+                <button onClick={() => toggleDayCompletion(quest)} className="flex items-center gap-2 min-w-0 flex-1 text-left">
+                  <span className={done ? 'text-blue-400' : 'text-gray-700'}>{done ? '●' : '○'}</span>
+                  <span className={`text-sm truncate ${done ? 'line-through text-gray-500' : 'text-gray-200'}`}>{quest.title}</span>
+                </button>
+                <div className="flex items-center gap-2 shrink-0">
+                  <div className="flex gap-1">
+                    {quest.rewards?.map((r: any) => (
+                      <span key={r.stat} className={`text-xs ${statColors[r.stat] ?? 'text-gray-500'}`}>
+                        +{r.xp_amount} {r.stat.slice(0, 3).toUpperCase()}
+                      </span>
+                    ))}
+                  </div>
+                  <button onClick={() => removeFromDay(quest.id)} className="text-gray-700 hover:text-red-500 transition-colors text-xs ml-1">✕</button>
                 </div>
-                <button onClick={() => removeFromDay(quest.id)} className="text-gray-700 hover:text-red-500 transition-colors text-xs ml-1">✕</button>
               </div>
-            </div>
-          ))}
+            )
+          })}
           {showAddDay && (
             <div className="bg-gray-950 border border-gray-800 rounded-xl overflow-hidden">
               {unscheduled.length === 0
